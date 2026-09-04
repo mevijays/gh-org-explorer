@@ -1,4 +1,5 @@
 import { compactNumber, relativeTime } from '../lib/format'
+import { HealthBadge } from './HealthBadge'
 import type { GitHubRepo } from '../lib/types'
 
 interface RepoListProps {
@@ -27,6 +28,7 @@ export function RepoList({ repos, selectedId, onSelect }: RepoListProps) {
               {repo.private && <span className="badge">private</span>}
               {repo.archived && <span className="badge">archived</span>}
               {repo.fork && <span className="badge">fork</span>}
+              <HealthBadge repo={repo} />
             </div>
             <p className="muted">{repo.description ?? 'No description'}</p>
             <div className="repo-meta">
