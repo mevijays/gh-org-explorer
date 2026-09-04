@@ -105,7 +105,7 @@ describe('downloadExport', () => {
   })
 
   function stubObjectUrl() {
-    const createObjectURL = vi.fn(() => 'blob:fake')
+    const createObjectURL = vi.fn((_blob: Blob) => 'blob:fake')
     const revokeObjectURL = vi.fn()
     Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, configurable: true })
     Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, configurable: true })
@@ -135,7 +135,7 @@ describe('downloadExport', () => {
 
     downloadExport([makeRepo()], 'mevijays', format, NOW)
 
-    expect((createObjectURL.mock.calls[0][0] as Blob).type).toBe(mime)
+    expect(createObjectURL.mock.calls[0][0].type).toBe(mime)
   })
 
   it('names the downloaded file after the org and date', () => {
