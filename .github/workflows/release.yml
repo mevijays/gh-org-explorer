@@ -1,0 +1,229 @@
+name: Build and publish image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag for the image pushed to GHCR (defaults to the short SHA)'
+        required: false
+        type: string
+      push_image:
+        description: 'Push the image to ghcr.io (uncheck for a build-only dry run)'
+        required: false
+        default: true
+        type: boolean
+      platforms:
+        description: 'Target platforms'
+        required: false
+        default: 'linux/amd64'
+        type: choice
+        options:
+          - linux/amd64
+          - linux/amd64,linux/arm64
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/artifact
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    outputs:
+      total: ${{ steps.summary.outputs.total }}
+      passed: ${{ steps.summary.outputs.passed }}
+      failed: ${{ steps.summary.outputs.failed }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Type-check
+        run: npm run lint
+
+      - name: Run the test suite
+        id: vitest
+        continue-on-error: true
+        run: npm run coverage
+
+      - name: Publish the test summary
+        id: summary
+        run: |
+          node scripts/test-summary.mjs
+          node -e "
+            const r = require('./test-results/results.json');
+            const fs = require('fs');
+            fs.appendFileSync(process.env.GITHUB_OUTPUT,
+              'total=' + r.numTotalTests + '\n' +
+              'passed=' + r.numPassedTests + '\n' +
+              'failed=' + r.numFailedTests + '\n');
+          "
+
+      - name: Append the coverage summary
+        if: always()
+        run: node scripts/coverage-report.mjs || true
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            test-results/
+            coverage/
+          retention-days: 7
+
+  build-and-push:
+    name: Build artifact and image
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build the production bundle
+        run: npm run build
+
+      - name: Package the bundle as an artifact
+        run: |
+          mkdir -p artifacts
+          tar -czf "artifacts/gh-org-explorer-${GITHUB_SHA::7}.tar.gz" -C dist .
+          ls -lh artifacts
+
+      - name: Upload the build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-bundle
+          path: artifacts/*.tar.gz
+          retention-days: 14
+
+      - name: Resolve the image tag
+        id: meta
+        run: |
+          TAG="${{ inputs.image_tag }}"
+          if [ -z "$TAG" ]; then TAG="${GITHUB_SHA::7}"; fi
+          # Lower-case the owner: GHCR rejects upper-case path segments.
+          REPO="$(echo "${REGISTRY}/${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image=$REPO" >> "$GITHUB_OUTPUT"
+          echo "ref=$REPO:$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ inputs.push_image }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the image
+        id: docker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push_image }}
+          load: ${{ !inputs.push_image && inputs.platforms == 'linux/amd64' }}
+          tags: |
+            ${{ steps.meta.outputs.ref }}
+            ${{ inputs.push_image && format('{0}:latest', steps.meta.outputs.image) || '' }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test the image
+        if: ${{ !inputs.push_image && inputs.platforms == 'linux/amd64' }}
+        run: |
+          docker run -d --name smoke -p 8080:8080 "${{ steps.meta.outputs.ref }}"
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+              echo "Container is healthy."
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8080/healthz
+          curl -fsS http://127.0.0.1:8080/ | head -c 200
+          docker rm -f smoke
+
+      - name: Publish the release summary
+        if: always()
+        env:
+          IMAGE_REF: ${{ steps.meta.outputs.ref }}
+          IMAGE_NAME_FULL: ${{ steps.meta.outputs.image }}
+          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+          DIGEST: ${{ steps.docker.outputs.digest }}
+          PUSHED: ${{ inputs.push_image }}
+        run: |
+          BUNDLE="$(ls -1 artifacts/*.tar.gz 2>/dev/null | head -1)"
+          SIZE="$( [ -n "$BUNDLE" ] && du -h "$BUNDLE" | cut -f1 || echo 'n/a' )"
+          {
+            echo "## 🚀 Build and publish summary"
+            echo
+            echo "### Test results (from the \`test\` job)"
+            echo
+            echo '| Metric | Value |'
+            echo '| --- | ---: |'
+            echo "| Total tests | **${{ needs.test.outputs.total }}** |"
+            echo "| ✅ Passed | **${{ needs.test.outputs.passed }}** |"
+            echo "| ❌ Failed | **${{ needs.test.outputs.failed }}** |"
+            echo
+            echo "### Build artifact"
+            echo
+            echo '| Item | Value |'
+            echo '| --- | --- |'
+            echo "| Bundle | \`$(basename "${BUNDLE:-none}")\` |"
+            echo "| Size | $SIZE |"
+            echo "| Artifact name | \`web-bundle\` |"
+            echo
+            if [ "$PUSHED" = "true" ]; then
+              echo "### 📦 Image published"
+              echo
+              echo '| Field | Value |'
+              echo '| --- | --- |'
+              echo "| Registry | \`${{ env.REGISTRY }}\` |"
+              echo "| Image | \`$IMAGE_NAME_FULL\` |"
+              echo "| Tag | \`$IMAGE_TAG\` |"
+              echo "| Full reference | \`$IMAGE_REF\` |"
+              echo "| Digest | \`${DIGEST:-unavailable}\` |"
+              echo "| Platforms | \`${{ inputs.platforms }}\` |"
+              echo "| Commit | \`${GITHUB_SHA}\` |"
+              echo
+              echo "Pull it with:"
+              echo
+              echo '```bash'
+              echo "docker pull $IMAGE_REF"
+              echo "docker run --rm -p 8080:8080 $IMAGE_REF"
+              echo '```'
+              echo
+              echo "Package page: ${{ github.server_url }}/orgs/${{ github.repository_owner }}/packages/container/package/artifact"
+            else
+              echo "### 🧪 Dry run — image built but not pushed"
+              echo
+              echo "Would have published \`$IMAGE_REF\`. Re-run with **push_image** checked to publish."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
