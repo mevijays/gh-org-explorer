@@ -30,7 +30,11 @@ export class GitHubClient {
 
   constructor(token: string, fetchImpl: typeof fetch = fetch) {
     this.token = token.trim()
-    this.fetchImpl = fetchImpl
+    // `fetch` must be called with the global object as its receiver. Storing it
+    // on the instance and calling `this.fetchImpl(...)` would pass the client
+    // as the receiver instead, which browsers reject with
+    // "Failed to execute 'fetch' on 'Window': Illegal invocation".
+    this.fetchImpl = fetchImpl.bind(globalThis)
   }
 
   get rateLimit(): RateLimit | null {
