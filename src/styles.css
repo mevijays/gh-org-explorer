@@ -104,3 +104,12 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .repo-detail section:first-of-type { border-top: none; }
 
 .token-form code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+
+.health {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  border-radius: 999px; padding: 1px 7px; border: 1px solid currentColor;
+  margin-left: auto; white-space: nowrap;
+}
+.health-healthy { color: var(--ok); }
+.health-attention { color: #d29922; }
+.health-stale { color: var(--muted); }
