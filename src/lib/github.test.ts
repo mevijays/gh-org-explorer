@@ -36,6 +36,27 @@ describe('GitHubClient reads', () => {
     expect(branches[0].name).toBe('main')
   })
 
+  it('calls fetch with the global as its receiver', async () => {
+    // Browsers reject `fetch` invoked with any other receiver:
+    // "Failed to execute 'fetch' on 'Window': Illegal invocation". Storing it
+    // on the instance and calling `this.fetchImpl(...)` does exactly that, so
+    // this stub fails the same way the real browser API would.
+    const strictFetch = function (this: unknown) {
+      if (this !== globalThis) {
+        throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation")
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(makeUser()), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    } as unknown as typeof fetch
+
+    const viewer = await new GitHubClient('t', strictFetch).getViewer()
+    expect(viewer.login).toBe('octocat')
+  })
+
   it('records rate limit headers', async () => {
     const fetchImpl = stubFetch({ '/user': { body: makeUser() } })
     const client = new GitHubClient('t', fetchImpl)
